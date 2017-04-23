@@ -15,9 +15,17 @@ defmodule ImagePreviewer.Router do
   plug :match
   plug :dispatch
 
-  get "/",                do: send_resp(conn, 200, "Default")
-  post "/image-preview",  do: ImagePreviewer.Parser.get_preview(conn)
-  match _,                do: send_resp(conn, 404, "Oops")
+  post "/image-preview" do
+    conn
+    |> put_resp_content_type("application/json")
+    |> ImagePreviewer.Parser.get_preview
+  end
+
+  match _ do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(404, Poison.encode!(%{error: true, message: "Not found"}))
+  end
 
   def handle_errors(conn, %{kind: _kind, reason: _reason, stack: _stack}) do
     send_resp(conn, conn.status, "Something went wrong")

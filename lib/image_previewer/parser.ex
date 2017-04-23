@@ -1,8 +1,8 @@
 defmodule ImagePreviewer.Parser do
   import Plug.Conn
 
-  defmodule Exception do
-    defexception plug_status: 400, message: "Oops"
+  defmodule PreviewNotAvailable do
+    defexception plug_status: 400, message: "Preview not available"
   end
   @moduledoc """
   Provides a function `get_image/1` to get the best fit image preview from a url
@@ -21,35 +21,38 @@ defmodule ImagePreviewer.Parser do
   """
   # @spec get_image(String.t) :: 
   def get_preview(conn) do
-    preview = conn.body_params["url"]
-      |> find_tags_from_url
-      # we pass url as second argument in case the image url is relative e.g. "/path/to/img.jpg"
-      |> get_preview_properties(conn.body_params["url"])
+    url = conn.body_params["url"]
+    response = url |> find_tags_from_url
+    
+    case response do
+      {:ok, body} ->
+        # we pass url as second argument in case the image url is relative e.g. "/path/to/img.jpg"
+        preview = body |> get_preview_properties(url)
 
-    conn
-      |> put_resp_content_type("application/json")
-      |> send_resp(200, Poison.encode!(%{preview: preview}))
+        try do
+          send_resp(conn, 200, Poison.encode!(%{preview: preview}))
+        rescue
+          e -> send_resp(conn, 400, Poison.encode!(%{error: true, message: e}))
+        end
+      {:error, reason} -> send_resp(conn, 400, Poison.encode!(%{error: true, message: reason}))
+    end
   end
   
   defp find_tags_from_url(url) do
     case HTTPoison.get(url) do
       {:ok, %HTTPoison.Response{status_code: 200, body: body}} ->
         # Get <title>, <img> and <meta> tags
-        Floki.find(body, "title, meta, img")
+        {:ok, Floki.find(body, "title, meta, img")}
       {:ok, %HTTPoison.Response{status_code: 404}} ->
-        raise message: "Not found", plug_status: 400
+        {:error, "Resource not found"}
       {:error, %HTTPoison.Error{reason: reason}} ->
-        IO.puts reason
-        raise Exception
-      _ ->
-        raise Exception
+        {:error, "Failed to fetch URL, reason: #{reason}"}
+      _ -> 
+        {:error, "Resource moved, deleted or something bad has happened in the requested URL"}
     end
   end
 
   defp get_preview_properties(tags, url) do
-    # Prioritize getting image, title, description from og attributes
-    # performance and readibility. Opted for readibility for people reading the code
-    # Find og tags first, if there are og tags, we return tags with og values
 
     # Prioritize getting images and meta information from :og
     case find_og_properties(tags) do
@@ -58,7 +61,7 @@ defmodule ImagePreviewer.Parser do
           |> get_values_from_og_attributes
     # If og attributes not found, use standard <img> and <title>
       {:standard} -> get_values_from_standard_attr(tags, url)
-      _ -> %{}
+      _ -> {:error, "Could not get preview properties"}
     end
   end
 
@@ -91,12 +94,6 @@ defmodule ImagePreviewer.Parser do
     filtered_tags = tags
                   # Filter out only <img> ang <title> tags
                   |> Enum.filter(&(Enum.member?(lookup_standard_tags, elem(&1, 0))))
-    
-
-    # if filtered_tags do
-      
-    # end
-
     image_url = filtered_tags
                 # Get only items that has non-empty "src" for <img> tags
                 |> Enum.filter(
@@ -108,7 +105,7 @@ defmodule ImagePreviewer.Parser do
                         fn attribute ->
                           case attribute do
                             {"src", ""} -> false
-                            {"src", value} -> true
+                            {"src", _} -> true
                             _ -> false
                           end
                         end
@@ -117,7 +114,7 @@ defmodule ImagePreviewer.Parser do
                   end
                 )
                 # Check if there are valid <img> otherwise throw
-                |> throw_if_empty
+                |> throw_if_empty!
                 # Get the first image
                 |> List.first
                 # Get the attributes list
@@ -126,7 +123,7 @@ defmodule ImagePreviewer.Parser do
                 |> Enum.filter(
                   fn attribute ->
                     case attribute do
-                      {"src", value} -> true
+                      {"src", _} -> true
                       _ -> false
                     end
                   end
@@ -151,7 +148,7 @@ defmodule ImagePreviewer.Parser do
             |> List.first
             # Gets its array of children nodes
             |> elem(2)
-            |> throw_if_empty
+            |> throw_if_empty!
             # Get the only child text which is the title
             |> List.first
 
@@ -194,10 +191,10 @@ defmodule ImagePreviewer.Parser do
       |> Enum.into(%{})
   end
 
-  defp throw_if_empty (list) do
+  defp throw_if_empty!(list) do
     cond do
       # Throw if there are no images fit
-      Enum.empty?(list) -> raise Exception
+      Enum.empty?(list) -> raise PreviewNotAvailable
       true -> list
     end
   end
